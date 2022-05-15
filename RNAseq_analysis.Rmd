@@ -1,0 +1,114 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+This RMarkdown notebook analyzes single cell RNA-seq data to find genes that are expressed exclusively in human lung ciliated cells. The data is published in GEO with accession number [GSE167295](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE167295).
+
+`Seurat` package is used for this analysis.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(Seurat)
+```
+
+There are three samples taken from three chronic obstructive pulmonary disease (COPD) patients. Since COPD do not have any known effect on cilia function, we assume that transcription profile of ciliary genes do not alter in these patients; hence we can use this dataset to determine ciliary genes.
+
+First read data which includes matrix with number of reads, barcodes and genes.
+
+```{r message=FALSE, warning=FALSE}
+sc167<-ReadMtx(mtx = "files/COPD/GSM5100998_SC167matrix.mtx.gz", features = "files/COPD/GSM5100998_SC167genes.tsv.gz",
+              cells = "files/COPD/GSM5100998_SC167barcodes.tsv.gz")
+
+sc170<-ReadMtx(mtx = "files/COPD/GSM5100999_SC170matrix.mtx.gz", features = "files/COPD/GSM5100999_SC170genes.tsv.gz",
+               cells = "files/COPD/GSM5100999_SC170barcodes.tsv.gz")
+
+sc200<-ReadMtx(mtx = "files/COPD/GSM5101000_SC200matrix.mtx.gz", features = "files/COPD/GSM5101000_SC200genes.tsv.gz",
+               cells = "files/COPD/GSM5101000_SC200barcodes.tsv.gz")
+
+```
+
+Then we can create Seurat objects that are needed for downstream analysis with `Seurat` package.
+
+```{r message=FALSE, warning=FALSE}
+sc167<-CreateSeuratObject(counts = sc167, project = "sc167")
+sc170<-CreateSeuratObject(counts = sc170, project = "sc170")
+sc200<-CreateSeuratObject(counts = sc200, project = "sc200")
+```
+
+We can add new column to meta data, indicating sample numbers. This might be useful if we want to analyse differences between samples.
+
+```{r message=FALSE, warning=FALSE}
+sc167@meta.data$type<-"sc167"
+sc170@meta.data$type<-"sc170"
+sc200@meta.data$type<-"sc200"
+```
+
+Before integrating these samples, we need to clean and normalize data. To apply the same code for all three samples, we put them in a list and apply various functions to the list.
+First, we need to determine the percentage of reads that map to the mitochondrial genome. Low quality cells may show high mitochondrial contamination. 
+Then we filter out the cells expressing too much or too few unique genes, which is stored in the column `nFeature_RNA`.
+Next, we normalize data and identify genes having highly variable expression between different cells. These genes will be a better indicator of cell types and different conditions.
+
+All these newly generated data is added to the seurat objects.
+
+```{r message=FALSE, warning=FALSE}
+object<-list(sc167, sc170, sc200)
+
+object<- lapply(X = object, FUN = function(x) {
+  x[["percent.mt"]]<-PercentageFeatureSet(x, pattern = "^MT-")
+  x@meta.data<-x@meta.data[!is.nan(x@meta.data$percent.mt),]
+  x<-subset(x, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+  x<-NormalizeData(x)
+  x<-FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+})
+```
+
+Next, we select genes having highly variable expression between dataset and integrate all three datasets.
+
+```{r message=FALSE, warning=FALSE}
+features<-SelectIntegrationFeatures(object.list = object)
+anchors<-FindIntegrationAnchors(object.list = object, anchor.features = features)
+combined<-IntegrateData(anchorset = anchors)
+```
+
+Then we scale the data and perform dimensional reduction (PCA) on integrated data.
+```{r message=FALSE, warning=FALSE}
+combined<-ScaleData(combined)
+combined<-RunPCA(combined)
+```
+
+In order to determine the number of PC to use in clustering, we draw elbow plot to see the variance in each PC. We can see that 24 PC can represent the majority of data. Therefore, we will use first 24 PC in the following functions.
+```{r}
+ElbowPlot(combined, ndims = 50)
+```
+
+Next, we will cluster the cells and draw UMAP plot to see cell groups.
+```{r message=FALSE, warning=FALSE}
+combined<-FindNeighbors(combined, reduction = "pca", dims = 1:24)
+combined<-FindClusters(combined, resolution = 0.5)
+
+combined<-RunUMAP(combined, reduction = "pca", dims = 1:24)
+
+```
+
+Draw the UMAP plot.
+```{r}
+DimPlot(combined, reduction = "umap", label = TRUE, repel = TRUE)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+DefaultAssay(combined)<-"RNA"
+markers1<-FindAllMarkers(combined, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+```
+
+```{r}
+markers1$cluster[markers1$gene %in% "FOXJ1"]
+```
+
+```{r}
+ciliary_genes<-markers1[markers1$cluster == 6,]
+ciliary_genes
+```
